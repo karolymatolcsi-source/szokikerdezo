@@ -1,0 +1,327 @@
+<!DOCTYPE html>
+<html lang="hu">
+<head>
+  <meta charset="UTF-8">
+  <title>Szókikérdező Leitner – Webapp</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <link rel="manifest" href="manifest.json">
+  <link rel="icon" type="image/png" href="icon-192.png">
+  <meta name="theme-color" content="#134674">
+  <style>
+    body { background: #f6fafc; color: #111; font-family: sans-serif; max-width: 900px; margin: 2em auto; }
+    h1 { color: #134674; }
+    .top-panel { margin-bottom:1.4em; }
+    .question-block { background: #fff; border-radius: 9px; box-shadow: 0 2px 8px #ccc2; padding: 1em; margin-bottom: 1em; }
+    label { font-weight: bold; margin-top: 0.8em; display: block; }
+    input[type="text"], select { width: 98%; font-size: 1.1em; margin-bottom: 0.3em; padding: 0.4em; border-radius:6px; border:1px solid #8882;}
+    input[type="text"]:focus { outline: 2px solid #134674; }
+    .good { color: #237a32; font-weight: bold; }
+    .bad { color: #d02536; font-weight: bold; }
+    .checkmark { font-size: 1.35em; margin-left: 0.2em;}
+    .field-block { margin-bottom:0.6em; }
+    .help-char { color: #888; font-style: italic; }
+    .summary-block { background: #e7e9ed; border-radius: 7px; margin-top: 1em; padding: 0.8em; }
+    .summary-list { margin:0.5em 0 0.5em 1em; }
+    .example { background: #f5e6b2; border-radius: 5px; padding: 0.6em; margin-top: 1em; }
+    .next-row { margin-top: 1.2em; }
+    .stat-table { width: 100%; border-collapse: collapse; }
+    .stat-table th, .stat-table td { border: 1px solid #8882; padding: 0.4em 0.6em; text-align: center; }
+    button { margin: 0.3em 0.6em 0.3em 0; font-size: 1em; border-radius: 7px; border: none; background: #134674; color: #fff; padding: 0.6em 1.4em; cursor: pointer;}
+    button:disabled { background: #aaa; }
+    @media (max-width: 900px) { body { max-width: 98vw; } }
+  </style>
+</head>
+<body>
+  <h1>Szókikérdező Leitner – Webapp</h1>
+  <div class="top-panel">
+    <label style="display:inline-block; margin-right:1em;">Felhasználó: <input type="text" id="usernameInput" style="width:150px; display:inline-block;"></label>
+    <select id="wordlistDropdown" style="width:auto; display:inline-block;"></select>
+    <button id="loadListBtn">Szólista betöltése</button>
+    <span id="topicName" style="margin-left:1em; color:#134674;"></span>
+  </div>
+  <div>
+    <label><input type="radio" name="langdir" value="hu2de" checked> Magyar &rarr; Német</label>
+    <label><input type="radio" name="langdir" value="de2hu"> Német &rarr; Magyar</label>
+    <button id="startBtn" disabled>Indítás</button>
+    <button id="endBtn" style="display:none;">Befejezés</button>
+  </div>
+  <div id="mainContent"></div>
+  <div id="statContent"></div>
+  <script>
+    // --- PWA offline cache (service worker) regisztráció ---
+    if ('serviceWorker' in navigator) navigator.serviceWorker.register('service-worker.js');
+
+    // --- Alapváltozók
+    let words = [], wordQueue = [], topic = '', current = null, currentIndex = 0;
+    let errorList = [], stat = {}, langdir = 'hu2de', username = "";
+    let localKey = () => "leitner_stat_" + (username||"vendeg") + "_" + topic;
+    // --- Szólista dropdown feltöltése ---
+    async function fetchWordlists() {
+      let res = await fetch('words/list.json'); // pl. [{file:"epites.json",name:"Építés"},...]
+      let files = await res.json();
+      let sel = document.getElementById('wordlistDropdown');
+      sel.innerHTML = "";
+      files.forEach(f => {
+        let opt = document.createElement('option');
+        opt.value = f.file;
+        opt.innerText = f.name;
+        sel.appendChild(opt);
+      });
+    }
+    fetchWordlists();
+
+    // --- Felhasználónév kezelés
+    let userInput = document.getElementById('usernameInput');
+    userInput.value = localStorage.getItem("lastUser") || "";
+    userInput.onchange = userInput.onblur = function() {
+      username = userInput.value.trim() || "vendeg";
+      localStorage.setItem("lastUser", username);
+      if(topic) loadStatFromStorage();
+    };
+    username = userInput.value.trim() || "vendeg";
+
+    // --- Szólista betöltése gombra ---
+    document.getElementById('loadListBtn').onclick = async function() {
+      let file = document.getElementById('wordlistDropdown').value;
+      let res = await fetch('words/' + file);
+      words = await res.json();
+      topic = file.replace('.json','');
+      document.getElementById('topicName').innerText = "Aktuális témakör: "+topic;
+      loadStatFromStorage();
+      document.getElementById('startBtn').disabled = false;
+      document.getElementById('endBtn').style.display = "none";
+      document.getElementById('mainContent').innerHTML = "";
+      document.getElementById('statContent').innerHTML = "";
+    };
+
+    // --- Nyelvirány választó ---
+    document.querySelectorAll('input[name="langdir"]').forEach(el => {
+      el.addEventListener('change', e => { langdir = e.target.value; });
+    });
+
+    // --- STAT tárolás, betöltés több userhez ---
+    function saveStatToStorage() {
+      if (username && topic) localStorage.setItem(localKey(), JSON.stringify(stat));
+    }
+    function loadStatFromStorage() {
+      if (username && topic) {
+        let raw = localStorage.getItem(localKey());
+        if (raw) stat = JSON.parse(raw);
+        else {
+          stat = {};
+          for (const w of words) stat[getWordId(w)] = { asked: 0, correct: 0, box: 1 };
+        }
+      }
+    }
+    function getWordId(w) {
+      if (w.type === "noun") return w.de || w.hu;
+      if (w.type === "verb") return w.de || w.hu;
+      if (w.type === "adj") return (w.de1 || w.hu1) + "_" + (w.de2 || w.hu2);
+      return w.de || w.hu;
+    }
+
+    // --- Kérdezés
+    document.getElementById('startBtn').onclick = () => {
+      errorList = [];
+      wordQueue = generateLeitnerQueue(words, stat);
+      currentIndex = 0;
+      document.getElementById('mainContent').innerHTML = '';
+      document.getElementById('statContent').innerHTML = '';
+      document.getElementById('endBtn').style.display = "";
+      nextQuestion();
+    };
+    document.getElementById('endBtn').onclick = showStats;
+
+    function shuffle(arr) {
+      let a = arr.slice();
+      for (let i = a.length - 1; i > 0; i--) {
+        const j = Math.floor(Math.random() * (i + 1));
+        [a[i], a[j]] = [a[j], a[i]];
+      }
+      return a;
+    }
+    function generateLeitnerQueue(words, stat) {
+      let queue = [];
+      for (let i=0;i<words.length;++i) {
+        let w = words[i], wid = getWordId(w), s = stat[wid]||{asked:0,correct:0,box:1};
+        let times = (s.box===1)?3:(s.box===2)?2:1;
+        for(let j=0;j<times;++j) queue.push(i);
+      }
+      return shuffle(queue);
+    }
+
+    function nextQuestion() {
+      if (wordQueue.length === 0 && errorList.length === 0) { showStats(); return; }
+      if (currentIndex > 0 && errorList.length > 0 && currentIndex % 4 === 0) wordQueue.push(errorList.shift());
+      if (wordQueue.length === 0) { showStats(); return; }
+      const idx = wordQueue.shift();
+      current = words[idx]; current._idx = idx;
+      showQuestion(current);
+      currentIndex++;
+    }
+
+    function showQuestion(w) {
+      let html = `<div class="question-block"><form id="qaForm" autocomplete="off">`;
+      let fields = [], questionText = '', wordId = getWordId(w);
+
+      if (w.type === 'noun') {
+        if (!stat[wordId]) stat[wordId] = { asked: 0, correct: 0, box: 1 };
+        if (langdir === 'hu2de') {
+          questionText = `<b>Magyar:</b> ${w.hu}`;
+          fields.push({ label: "Német főnév", name: "de", placeholder: "főnév" });
+          fields.push({ label: "Névelő", name: "article", placeholder: "der/die/das" });
+          fields.push({ label: "Többes szám", name: "plural", placeholder: "Plural" });
+        } else {
+          questionText = `<b>Német:</b> ${w.article ? w.article + ' ' : ''}${w.de}`;
+          fields.push({ label: "Magyar jelentés", name: "hu", placeholder: "magyar jelentés" });
+        }
+      }
+      else if (w.type === 'verb') {
+        if (!stat[wordId]) stat[wordId] = { asked: 0, correct: 0, box: 1 };
+        if (langdir === 'hu2de') {
+          questionText = `<b>Magyar:</b> ${w.hu}`;
+          fields.push({ label: "Német ige", name: "de", placeholder: "ige" });
+          if ('vonzat' in w || w.vonzat === "") fields.push({ label: "Vonzat (pl. auf+A)", name: "vonzat", placeholder: "von+A, auf+A, üres ha nincs" });
+          if (w.praeteritum) fields.push({ label: "Präteritum", name: "praeteritum", placeholder: "pl. machte" });
+          if (w.perfekt) fields.push({ label: "Perfekt", name: "perfekt", placeholder: "pl. hat gemacht" });
+        } else {
+          questionText = `<b>Német:</b> ${w.de}`;
+          fields.push({ label: "Magyar jelentés", name: "hu", placeholder: "magyar jelentés" });
+        }
+      }
+      else if (w.type === 'adj') {
+        if (!stat[wordId]) stat[wordId] = { asked: 0, correct: 0, box: 1 };
+        if (langdir === 'hu2de') {
+          questionText = `<b>Magyar:</b> ${w.hu1} – ${w.hu2} <br><i>(Add meg mindkét melléknevet németül!)</i>`;
+          fields.push({ label: `Németül: ${w.hu1}`, name: "de1", placeholder: "német melléknév 1" });
+          fields.push({ label: `Németül: ${w.hu2}`, name: "de2", placeholder: "német melléknév 2" });
+        } else {
+          questionText = `<b>Német:</b> ${w.de1} – ${w.de2} <br><i>(Add meg mindkét melléknevet magyarul!)</i>`;
+          fields.push({ label: `Magyarul: ${w.de1}`, name: "hu1", placeholder: "magyar melléknév 1" });
+          fields.push({ label: `Magyarul: ${w.de2}`, name: "hu2", placeholder: "magyar melléknév 2" });
+        }
+      }
+      else {
+        if (!stat[wordId]) stat[wordId] = { asked: 0, correct: 0, box: 1 };
+        questionText = langdir === 'hu2de'
+          ? `<b>Magyar:</b> ${w.hu}`
+          : `<b>Német:</b> ${w.de}`;
+        fields.push({
+          label: langdir === 'hu2de' ? "Német jelentés" : "Magyar jelentés",
+          name: langdir === 'hu2de' ? "de" : "hu",
+          placeholder: "fordítás"
+        });
+      }
+      html += `<div>${questionText}</div>`;
+      fields.forEach((f, i) =>
+        html += `<div class="field-block"><label>${f.label}:<br>
+                  <input type="text" name="${f.name}" autocomplete="off" data-idx="${i}" placeholder="${f.placeholder}" required>
+                  <span id="mark_${f.name}" class="checkmark"></span>
+                  <span id="help_${f.name}" class="help-char"></span>
+                </label></div>`);
+      html += `<div id="afterAllInputs"></div>`;
+      html += `<button type="submit" style="display:none"></button></form></div>`;
+      document.getElementById('mainContent').innerHTML = html;
+
+      const form = document.getElementById('qaForm');
+      let progress = Array(fields.length).fill(false);
+      let alreadySummed = false;
+      fields.forEach((f, i) => {
+        let inp = form[f.name];
+        inp.addEventListener('keydown', function(ev) {
+          if (ev.key !== 'Enter' || progress[i] || alreadySummed) return;
+          ev.preventDefault();
+          let userVal = inp.value.trim();
+          let solVal = (w[f.name] ?? '').trim();
+          if (!userVal) {
+            if (solVal) {
+              document.getElementById('help_' + f.name).innerHTML = `<span class="help">Segítség: <b>${solVal[0]}</b></span>`;
+              inp.value = '';
+            } else {
+              progress[i] = true;
+              markField(i, true, f, userVal, solVal);
+              focusNext();
+            }
+            return;
+          }
+          let isOK = (f.name === "vonzat" && !solVal && !userVal)
+              || (userVal.toLowerCase() === solVal.toLowerCase());
+          progress[i] = true;
+          markField(i, isOK, f, userVal, solVal);
+          if (!isOK && !errorList.includes(w._idx)) errorList.push(w._idx);
+          focusNext();
+          if (progress.every(x=>x) && !alreadySummed) {
+            alreadySummed = true;
+            Array.from(form.elements).forEach(elem => elem.disabled = true);
+            stat[wordId].asked++;
+            let okAll = true;
+            for (let j = 0; j < fields.length; ++j) {
+              let fj = fields[j], sol = (w[fj.name] ?? '').trim(), inpVal = form[fj.name].value.trim();
+              if (!((fj.name === "vonzat" && !sol && !inpVal) || inpVal.toLowerCase() === sol.toLowerCase())) okAll = false;
+            }
+            if (okAll) {
+              stat[wordId].correct++;
+              if (stat[wordId].box < 3) stat[wordId].box++;
+            } else {
+              if (stat[wordId].box > 1) stat[wordId].box--;
+            }
+            saveStatToStorage();
+            showSummary(w, fields);
+          }
+        });
+      });
+      setTimeout(() => form.querySelector('input[type="text"]').focus(), 20);
+      function markField(idx, ok, field, userVal, solVal) {
+        let m = document.getElementById('mark_' + field.name);
+        let symbol = ok ? '✔️' : '❌';
+        m.innerHTML = `<span class="${ok ? 'good' : 'bad'}">${symbol}</span> <span class="help">(${ok ? userVal : solVal})</span>`;
+      }
+      function focusNext() {
+        let i = progress.findIndex(x => !x);
+        if (i !== -1) {
+          form[fields[i].name].focus();
+        }
+      }
+      function showSummary(w, fields) {
+        let afterDiv = document.getElementById('afterAllInputs');
+        let list = `<ul class="summary-list">`;
+        fields.forEach(f => {
+          let solVal = (w[f.name] ?? '').trim();
+          let label = f.label.replace(/:/g,'');
+          list += `<li><b>${label}:</b> ${solVal || "<i>(nincs)</i>"}</li>`;
+        });
+        list += `</ul>`;
+        let extra = "";
+        if (w.type === "verb" && w.example) {
+          extra = `<div class="example"><b>Példamondat:</b> ${w.example}</div>`;
+        }
+        afterDiv.innerHTML =
+          `<div class="summary-block"><b>Megoldás összefoglaló:</b>${list}${extra}</div>
+            <div class="next-row"><button id="nextBtn">Tovább (Enter)</button></div>`;
+        let goNext = () => {
+          document.removeEventListener('keydown', onKey);
+          nextQuestion();
+        };
+        let onKey = (e) => { if (e.key === 'Enter') goNext(); };
+        document.getElementById('nextBtn').onclick = goNext;
+        setTimeout(() => document.addEventListener('keydown', onKey), 50);
+      }
+    }
+
+    // ---- STATISZTIKA ----
+    function showStats() {
+      document.getElementById('mainContent').innerHTML = '';
+      let html = `<div class="summary-block"><h3>Eredmények / Statisztika (Leitner 3 doboz)</h3>
+      <table class="stat-table"><tr>
+      <th>Szó</th><th>Kérdezve</th><th>Helyes</th><th>%</th><th>Doboz</th></tr>`;
+      for (let k in stat) {
+        let asked = stat[k].asked, correct = stat[k].correct, pc = asked ? Math.round(100 * correct / asked) : 0, box = stat[k].box;
+        html += `<tr><td>${k}</td><td>${asked}</td><td>${correct}</td><td>${pc}%</td><td>${box || 1}</td></tr>`;
+      }
+      html += `</table></div>`;
+      document.getElementById('statContent').innerHTML = html;
+      document.getElementById('endBtn').style.display = "none";
+    }
+  </script>
+</body>
+</html>
