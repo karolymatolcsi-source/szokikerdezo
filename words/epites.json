@@ -1,0 +1,5 @@
+[
+  { "type": "noun", "hu": "ház", "de": "Haus", "article": "das", "plural": "Häuser" },
+  { "type": "verb", "hu": "épít", "de": "bauen", "vonzat": "", "praeteritum": "baute", "perfekt": "hat gebaut", "example": "Wir bauen ein Haus." },
+  { "type": "adj", "hu1": "magas", "de1": "hoch", "hu2": "alacsony", "de2": "niedrig" }
+]
